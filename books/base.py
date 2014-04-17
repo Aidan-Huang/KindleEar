@@ -165,9 +165,18 @@ class BaseFeedBook:
     
     # 内置的几个必须删除的标签，不建议子类修改
     insta_remove_tags = ['script','object','video','embed','noscript','style','link']
-    insta_remove_attrs = ['width','height','onclick','onload',]
+    insta_remove_attrs = ['width','height','onclick','onload','style']
     insta_remove_classes = []
     insta_remove_ids = ['controlbar_container',]
+    
+    #---------------add by rexdf-------------
+    #下面的积极关键词,有些内容会被readability过滤掉，比如html5的figure，可以通过增加权重保留
+    #这个是针对部分html5网站优化的，子类需要修改可以不用继承，因为子类往往针对特定某一网站，可以专门定制
+    positive_classes = ['image-block','image-block-caption','image-block-ins'] 
+
+    #图像最小大小，有些网站会在正文插入一个1*1像素的图像，大约是带有的水印信息，这样的图片视觉无意义，而且干扰thumbnail
+    img_min_size = 1024
+    #---------------end----------------------
     
     # 子类定制的HTML标签清理内容
     remove_tags = [] # 完全清理此标签
@@ -323,17 +332,25 @@ class BaseFeedBook:
                         updated = e.published_parsed
                     elif hasattr(e, 'created_parsed'):
                         updated = e.created_parsed
-                        
+                    
                     if self.oldest_article > 0 and updated:
-                        delta = tnow - datetime.datetime(*(updated[0:6]))
+                        updated = datetime.datetime(*(updated[0:6]))
+                        delta = tnow - updated
                         if delta.days*86400+delta.seconds > 86400*self.oldest_article:
-                            self.log.info("Skip old article: %s" % e.link)
+                            self.log.info("Skip old article(%s): %s" % (updated.strftime('%Y-%m-%d %H:%M:%S'),e.link))
                             continue
                     
                     #支持HTTPS
-                    urlfeed = e.link.replace('http://','https://') if url.startswith('https://') else e.link
-                    if urlfeed in urladded:
-                        continue
+                    if hasattr(e, 'link'):
+                        if url.startswith('https://'):
+                            urlfeed = e.link.replace('http://','https://')
+                        else:
+                            urlfeed = e.link
+                            
+                        if urlfeed in urladded:
+                            continue
+                    else:
+                        urlfeed = ''
                         
                     desc = None
                     if isfulltext:
@@ -349,7 +366,10 @@ class BaseFeedBook:
                             desc = summary
                             
                         if not desc:
-                            self.log.warn('fulltext feed item no has desc,link to webpage for article.(%s)'%e.title)
+                            if not urlfeed:
+                                continue
+                            else:
+                                self.log.warn('fulltext feed item no has desc,link to webpage for article.(%s)'%e.title)
                     urls.append((section, e.title, urlfeed, desc))
                     urladded.add(urlfeed)
             else:
@@ -360,8 +380,8 @@ class BaseFeedBook:
     def Items(self, opts=None, user=None):
         """
         生成器，返回一个元组
-        对于HTML：section,url,title,content,brief
-        对于图片，mime,url,filename,content,brief
+        对于HTML：section,url,title,content,brief,thumbnail
+        对于图片，mime,url,filename,content,brief,thumbnail
         """
         urls = self.ParseFeedUrls()
         readability = self.readability if self.fulltext_by_readability else self.readability_by_soup
@@ -380,13 +400,13 @@ class BaseFeedBook:
                 article = self.FragToXhtml(desc, ftitle)
             
             #如果是图片，title则是mime
-            for title, imgurl, imgfn, content, brief in readability(article,url,opts,user):
+            for title, imgurl, imgfn, content, brief, thumbnail in readability(article,url,opts,user):
                 if title.startswith(r'image/'): #图片
-                    yield (title, imgurl, imgfn, content, brief)
+                    yield (title, imgurl, imgfn, content, brief, thumbnail)
                 else:
                     if not title: title = ftitle
                     content =  self.postprocess(content)
-                    yield (section, url, title, content, brief)
+                    yield (section, url, title, content, brief, thumbnail)
     
     def fetcharticle(self, url, decoder):
         """链接网页获取一篇文章"""
@@ -414,19 +434,24 @@ class BaseFeedBook:
             return decoder.decode(content,opener.realurl)
         
     def readability(self, article, url, opts=None, user=None):
-        """ 使用readability-lxml处理全文信息 """
+        """ 使用readability-lxml处理全文信息
         #因为图片文件占内存，为了节省内存，这个函数也做为生成器
+        """
         content = self.preprocess(article)
         
         # 提取正文
         try:
-            doc = readability.Document(content)
+            doc = readability.Document(content,positive_keywords=self.positive_classes)
             summary = doc.summary(html_partial=False)
         except:
             self.log.warn('article is invalid.[%s]' % url)
             return
             
         title = doc.short_title()
+        if not title:
+            self.log.warn('article has no title.[%s]' % url)
+            return
+            
         title = self.processtitle(title)
         
         #if summary.startswith('<body'): #readability解析出错
@@ -445,19 +470,20 @@ class BaseFeedBook:
             soup.html.insert(0, h)
             
         #如果没有内容标题则添加
-        t = soup.html.body.find(['h1','h2'])
+        body = soup.html.body
+        t = body.find(['h1','h2'])
         if not t:
-            t = soup.new_tag('h1')
+            t = soup.new_tag('h2')
             t.string = title
-            soup.html.body.insert(0, t)
+            body.insert(0, t)
         else:
             totallen = 0
             for ps in t.previous_siblings:
                 totallen += len(string_of_tag(ps))
                 if totallen > 40: #此H1/H2在文章中间出现，不是文章标题
-                    t = soup.new_tag('h1')
+                    t = soup.new_tag('h2')
                     t.string = title
-                    soup.html.body.insert(0, t)
+                    body.insert(0, t)
                     break
                     
         if self.remove_tags:
@@ -475,12 +501,20 @@ class BaseFeedBook:
         for cmt in soup.find_all(text=lambda text:isinstance(text, Comment)):
             cmt.extract()
             
+        #删除body的所有属性，以便InsertToc使用正则表达式匹配<body>
+        bodyattrs = [attr for attr in body.attrs]
+        for attr in bodyattrs:
+            del body[attr]
+        
         if self.extra_css:
             sty = soup.new_tag('style', type="text/css")
             sty.string = self.extra_css
             soup.html.head.append(sty)
         
         self.soupbeforeimage(soup)
+
+        has_imgs = False
+        thumbnail = None
         
         if self.keep_image:
             opener = URLOpener(self.host, timeout=self.timeout)
@@ -497,19 +531,30 @@ class BaseFeedBook:
                 imgresult = opener.open(imgurl)
                 imgcontent = self.process_image(imgresult.content,opts) if imgresult.status_code==200 else None
                 if imgcontent:
+                    if len(imgcontent) < self.img_min_size: #rexdf too small image
+                        img.decompose()
+                        continue
+                        
                     imgtype = imghdr.what(None, imgcontent)
                     if imgtype:
                         imgmime = r"image/" + imgtype
                         fnimg = "img%d.%s" % (self.imgindex, 'jpg' if imgtype=='jpeg' else imgtype)
                         img['src'] = fnimg
-                        yield (imgmime, imgurl, fnimg, imgcontent, None)
+                        
+                        #使用第一个图片做为目录缩略图
+                        if not has_imgs:
+                            has_imgs = True
+                            thumbnail = imgurl
+                            yield (imgmime, imgurl, fnimg, imgcontent, None, True)
+                        else:
+                            yield (imgmime, imgurl, fnimg, imgcontent, None, None)
                     else:
                         img.decompose()
                 else:
                     self.log.warn('fetch img failed(err:%d):%s' % (imgresult.status_code,imgurl))
                     img.decompose()
                     
-            #去掉图像上面的链接
+            #去掉图像上面的链接，以免误触后打开浏览器
             for img in soup.find_all('img'):
                 if img.parent and img.parent.parent and \
                     img.parent.name == 'a':
@@ -522,33 +567,13 @@ class BaseFeedBook:
         
         #插入分享链接
         if user:
-            if user.evernote and user.evernote_mail:
-                span = soup.new_tag('span')
-                span.string = '    '
-                soup.html.body.append(span)
-                href = "%s/share?act=evernote&u=%s&url=%s"%(DOMAIN,user.name,url)
-                if user.share_fuckgfw:
-                    href = SHARE_FUCK_GFW_SRV % urllib.quote(href)
-                ashare = soup.new_tag('a', href=href)
-                ashare.string = SAVE_TO_EVERNOTE
-                soup.html.body.append(ashare)
-            if user.wiz and user.wiz_mail:
-                span = soup.new_tag('span')
-                span.string = '    '
-                soup.html.body.append(span)
-                href = "%s/share?act=wiz&u=%s&url=%s"%(DOMAIN,user.name,url)
-                if user.share_fuckgfw:
-                    href = SHARE_FUCK_GFW_SRV % urllib.quote(href)
-                ashare = soup.new_tag('a', href=href)
-                ashare.string = SAVE_TO_WIZ
-                soup.html.body.append(ashare)
+            self.AppendShareLinksToArticle(soup, user, url)
             
         content = unicode(soup)
         
         #提取文章内容的前面一部分做为摘要
         brief = u''
         if GENERATE_TOC_DESC:
-            body = soup.find('body')
             for h in body.find_all(['h1','h2']): # 去掉h1/h2，避免和标题重复
                 h.decompose()
             for s in body.stripped_strings:
@@ -558,11 +583,12 @@ class BaseFeedBook:
                     break
         soup = None
         
-        yield (title, None, None, content, brief)
+        yield (title, None, None, content, brief, thumbnail)
         
     def readability_by_soup(self, article, url, opts=None, user=None):
-        """ 使用BeautifulSoup手动解析网页，提取正文内容 """
-        #因为图片文件占内存，为了节省内存，这个函数也做为生成器
+        """ 使用BeautifulSoup手动解析网页，提取正文内容
+        因为图片文件占内存，为了节省内存，这个函数也做为生成器
+        """
         content = self.preprocess(article)
         soup = BeautifulSoup(content, "lxml")
         
@@ -571,7 +597,10 @@ class BaseFeedBook:
         except AttributeError:
             self.log.warn('object soup invalid!(%s)'%url)
             return
-        
+        if not title:
+            self.log.warn('article has no title.[%s]' % url)
+            return
+            
         title = self.processtitle(title)
         soup.html.head.title.string = title
         
@@ -615,13 +644,16 @@ class BaseFeedBook:
                 del tag[attr]
         for cmt in soup.find_all(text=lambda text:isinstance(text, Comment)):
             cmt.extract()
-        
+            
         if self.extra_css:
             sty = soup.new_tag('style', type="text/css")
             sty.string = self.extra_css
             soup.html.head.append(sty)
             
         self.soupbeforeimage(soup)
+
+        has_imgs = False
+        thumbnail = None
         
         if self.keep_image:
             opener = URLOpener(self.host, timeout=self.timeout)
@@ -638,19 +670,30 @@ class BaseFeedBook:
                 imgresult = opener.open(imgurl)
                 imgcontent = self.process_image(imgresult.content,opts) if imgresult.status_code==200 else None
                 if imgcontent:
+                    if len(imgcontent) < self.img_min_size: #rexdf too small image
+                        img.decompose()
+                        continue
+                        
                     imgtype = imghdr.what(None, imgcontent)
                     if imgtype:
                         imgmime = r"image/" + imgtype
                         fnimg = "img%d.%s" % (self.imgindex, 'jpg' if imgtype=='jpeg' else imgtype)
                         img['src'] = fnimg
-                        yield (imgmime, imgurl, fnimg, imgcontent, None)
+                        
+                        #使用第一个图片做为目录缩略图
+                        if not has_imgs:
+                            has_imgs = True
+                            thumbnail = imgurl
+                            yield (imgmime, imgurl, fnimg, imgcontent, None, True)
+                        else:
+                            yield (imgmime, imgurl, fnimg, imgcontent, None, None)
                     else:
                         img.decompose()
                 else:
                     self.log.warn('fetch img failed(err:%d):%s' % (imgresult.status_code,imgurl))
                     img.decompose()
             
-            #去掉图像上面的链接
+            #去掉图像上面的链接，以免误触后打开浏览器
             for img in soup.find_all('img'):
                 if img.parent and img.parent.parent and \
                     img.parent.name == 'a':
@@ -660,52 +703,38 @@ class BaseFeedBook:
                 img.decompose()
         
         #如果没有内容标题则添加
-        t = soup.html.body.find(['h1','h2'])
+        body = soup.html.body
+        t = body.find(['h1','h2'])
         if not t:
-            t = soup.new_tag('h1')
+            t = soup.new_tag('h2')
             t.string = title
-            soup.html.body.insert(0, t)
+            body.insert(0, t)
         else:
             totallen = 0
             for ps in t.previous_siblings:
                 totallen += len(string_of_tag(ps))
                 if totallen > 40: #此H1/H2在文章中间出现，不是文章标题
-                    t = soup.new_tag('h1')
+                    t = soup.new_tag('h2')
                     t.string = title
-                    soup.html.body.insert(0, t)
+                    body.insert(0, t)
                     break
+        
+        #删除body的所有属性，以便InsertToc使用正则表达式匹配<body>
+        bodyattrs = [attr for attr in body.attrs]
+        for attr in bodyattrs:
+            del body[attr]
         
         self.soupprocessex(soup)
         
         #插入分享链接
         if user:
-            if user.evernote and user.evernote_mail:
-                span = soup.new_tag('span')
-                span.string = '    '
-                soup.html.body.append(span)
-                href = "%s/share?act=evernote&u=%s&url=%s"%(DOMAIN,user.name,url)
-                if user.share_fuckgfw:
-                    href = SHARE_FUCK_GFW_SRV % urllib.quote(href)
-                ashare = soup.new_tag('a', href=href)
-                ashare.string = SAVE_TO_EVERNOTE
-                soup.html.body.append(ashare)
-            if user.wiz and user.wiz_mail:
-                span = soup.new_tag('span')
-                span.string = '    '
-                soup.html.body.append(span)
-                href = "%s/share?act=wiz&u=%s&url=%s"%(DOMAIN,user.name,url)
-                if user.share_fuckgfw:
-                    href = SHARE_FUCK_GFW_SRV % urllib.quote(href)
-                ashare = soup.new_tag('a', href=href)
-                ashare.string = SAVE_TO_WIZ
-                soup.html.body.append(ashare)
-                
+            self.AppendShareLinksToArticle(soup, user, url)
+        
         content = unicode(soup)
         
         #提取文章内容的前面一部分做为摘要
         brief = u''
         if GENERATE_TOC_DESC:
-            body = soup.find('body')
             for h in body.find_all(['h1','h2']): # 去掉h1/h2，避免和标题重复
                 h.decompose()
             for s in body.stripped_strings:
@@ -715,7 +744,7 @@ class BaseFeedBook:
                     break
         soup = None
         
-        yield (title, None, None, content, brief)        
+        yield (title, None, None, content, brief, thumbnail)
     
     def process_image(self, data, opts):
         try:
@@ -729,7 +758,87 @@ class BaseFeedBook:
                                 reduceto=opts.reduce_image_to)
         except Exception:
             return None
-
+            
+    def AppendShareLinksToArticle(self, soup, user, url):
+        " 在文章末尾添加分享链接 "
+        if not user or not soup:
+            return
+        body = soup.html.body
+        if user.evernote and user.evernote_mail:
+            href = self.MakeShareLink('evernote', user, url)
+            ashare = soup.new_tag('a', href=href)
+            ashare.string = SAVE_TO_EVERNOTE
+            body.append(ashare)
+        if user.wiz and user.wiz_mail:
+            self.AppendSperate(soup)
+            href = self.MakeShareLink('wiz', user, url)
+            ashare = soup.new_tag('a', href=href)
+            ashare.string = SAVE_TO_WIZ
+            body.append(ashare)
+        if user.xweibo:
+            self.AppendSperate(soup)
+            href = self.MakeShareLink('xweibo', user, url)
+            ashare = soup.new_tag('a', href=href)
+            ashare.string = SHARE_ON_XWEIBO
+            body.append(ashare)
+        if user.tweibo:
+            self.AppendSperate(soup)
+            href = self.MakeShareLink('tweibo', user, url)
+            ashare = soup.new_tag('a', href=href)
+            ashare.string = SHARE_ON_TWEIBO
+            body.append(ashare)
+        if user.facebook:
+            self.AppendSperate(soup)
+            href = self.MakeShareLink('facebook', user, url)
+            ashare = soup.new_tag('a', href=href)
+            ashare.string = SHARE_ON_FACEBOOK
+            body.append(ashare)
+        if user.twitter:
+            self.AppendSperate(soup)
+            href = self.MakeShareLink('twitter', user, url)
+            ashare = soup.new_tag('a', href=href)
+            ashare.string = SHARE_ON_TWITTER
+            body.append(ashare)
+        if user.tumblr:
+            self.AppendSperate(soup)
+            href = self.MakeShareLink('tumblr', user, url)
+            ashare = soup.new_tag('a', href=href)
+            ashare.string = SHARE_ON_TUMBLR
+            body.append(ashare)
+        if user.browser:
+            self.AppendSperate(soup)
+            ashare = soup.new_tag('a', href=url)
+            ashare.string = OPEN_IN_BROWSER
+            body.append(ashare)
+            
+    def MakeShareLink(self, sharetype, user, url):
+        " 生成保存内容或分享文章链接的KindleEar调用链接 "
+        if sharetype in ('evernote','wiz'):
+            href = "%s/share?act=%s&u=%s&url="%(DOMAIN,sharetype,user.name)
+        elif sharetype == 'xweibo':
+            href = 'http://v.t.sina.com.cn/share/share.php?url='
+        elif sharetype == 'tweibo':
+            href = 'http://v.t.qq.com/share/share.php?url='
+        elif sharetype == 'facebook':
+            href = 'http://www.facebook.com/share.php?u='
+        elif sharetype == 'twitter':
+            href = 'http://twitter.com/home?status='
+        elif sharetype == 'tumblr':
+            href = 'http://www.tumblr.com/share/link?url='
+        else:
+            href = ''
+        if user.share_fuckgfw and sharetype in ('evernote','wiz','facebook','twitter'):
+            href = SHARE_FUCK_GFW_SRV % urllib.quote(href+url)
+        else:
+            href += urllib.quote(url)
+        return href
+        
+    def AppendSperate(self, soup):
+        " 在文章末尾添加'|'分隔符 "
+        span = soup.new_tag('span')
+        span.string = ' | '
+        soup.html.body.append(span)
+        
 class WebpageBook(BaseFeedBook):
     fulltext_by_readability = False
     
@@ -737,17 +846,13 @@ class WebpageBook(BaseFeedBook):
     def Items(self, opts=None, user=None):
         """
         生成器，返回一个元组
-        对于HTML：section,url,title,content,brief
-        对于图片，mime,url,filename,content,brief
+        对于HTML：section,url,title,content,brief,thumbnail
+        对于图片，mime,url,filename,content,brief,thumbnail
+        如果是图片，仅第一个图片的thumbnail返回True，其余为None
         """
-        #cnt4debug = 0
         decoder = AutoDecoder(False)
         timeout = self.timeout
         for section, url in self.feeds:
-            #cnt4debug += 1
-            #if IsRunInLocal and cnt4debug > 1:
-            #    break
-            
             opener = URLOpener(self.host, timeout=timeout)
             result = opener.open(url)
             status_code, content = result.status_code, result.content
@@ -823,20 +928,23 @@ class WebpageBook(BaseFeedBook):
             for cmt in soup.find_all(text=lambda text:isinstance(text, Comment)):
                 cmt.extract()
             
+            #删除body的所有属性，以便InsertToc使用正则表达式匹配<body>
+            body = soup.html.body
+            bodyattrs = [attr for attr in body.attrs]
+            for attr in bodyattrs:
+                del body[attr]
+                
             if self.extra_css:
                 sty = soup.new_tag('style', type="text/css")
                 sty.string = self.extra_css
                 soup.html.head.append(sty)
-                
+            
+            has_imgs = False
+            thumbnail = None
             if self.keep_image:
                 self.soupbeforeimage(soup)
                 for img in soup.find_all('img',attrs={'src':True}):
                     imgurl = img['src']
-                    if img.get('height') in ('1','2','3','4','5') \
-                        or img.get('width') in ('1','2','3','4','5'):
-                        self.log.warn('img size too small,take away it:%s' % imgurl)
-                        img.decompose()
-                        continue
                     if not imgurl.startswith('http'):
                         imgurl = self.urljoin(url, imgurl)
                     if self.fetch_img_via_ssl and url.startswith('https://'):
@@ -848,12 +956,23 @@ class WebpageBook(BaseFeedBook):
                     imgresult = opener.open(imgurl)
                     imgcontent = self.process_image(imgresult.content,opts) if imgresult.status_code==200 else None
                     if imgcontent:
+                        if len(imgcontent) < self.img_min_size: #rexdf too small image
+                            img.decompose()
+                            continue
+                            
                         imgtype = imghdr.what(None, imgcontent)
                         if imgtype:
                             imgmime = r"image/" + imgtype
                             fnimg = "img%d.%s" % (self.imgindex, 'jpg' if imgtype=='jpeg' else imgtype)
                             img['src'] = fnimg
-                            yield (imgmime, imgurl, fnimg, imgcontent, None)
+                            
+                            #使用第一个图片做为目录摘要图
+                            if not has_imgs:
+                                has_imgs = True
+                                thumbnail = imgurl
+                                yield (imgmime, imgurl, fnimg, imgcontent, None, True)
+                            else:
+                                yield (imgmime, imgurl, fnimg, imgcontent, None, None)
                         else:
                             img.decompose()
                     else:
@@ -876,7 +995,6 @@ class WebpageBook(BaseFeedBook):
             #提取文章内容的前面一部分做为摘要
             brief = u''
             if GENERATE_TOC_DESC:
-                body = soup.find('body')
                 for h in body.find_all(['h1','h2']): # 去掉h1/h2，避免和标题重复
                     h.decompose()
                 for s in body.stripped_strings:
@@ -887,8 +1005,8 @@ class WebpageBook(BaseFeedBook):
             soup = None
             
             content =  self.postprocess(content)
-            yield (section, url, title, content, brief)
-
+            yield (section, url, title, content, brief, thumbnail)
+            
 class BaseUrlBook(BaseFeedBook):
     """ 提供网页URL，而不是RSS订阅地址，
     此类生成的MOBI使用普通书籍格式，而不是期刊杂志格式

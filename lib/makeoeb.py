@@ -10,6 +10,7 @@ import calibre.utils.resources
 from calibre.ebooks.conversion.mobioutput import MOBIOutput
 from calibre.ebooks.conversion.epuboutput import EPUBOutput
 from calibre.utils.bytestringio import byteStringIO
+from config import *
 
 def MimeFromFilename(f):
     #从文件名生成MIME
@@ -60,8 +61,8 @@ def CreateOeb(log, path_or_stream, opts, encoding='utf-8'):
         encoding = None
     return OEBBook(log, html_preprocessor, pretty_print=opts.pretty_print, input_encoding=encoding)
 
-def getOpts():
-    from calibre.customize.profiles import KindleInput, KindleOutput
+def getOpts(output_type='kindle'):
+    from calibre.customize.profiles import KindleOutput, KindlePaperWhiteOutput, KindleDXOutput, KindleFireOutput, OutputProfile
     from config import REDUCE_IMAGE_TO
     opts = OptionValues()
     setattr(opts, "pretty_print", False)
@@ -74,17 +75,25 @@ def getOpts():
     setattr(opts, "mobi_toc_at_start", False)
     setattr(opts, "linearize_tables", True)
     setattr(opts, "source", None)
-    setattr(opts, "dest", KindleOutput(None))
-    setattr(opts, "output_profile", KindleOutput(None))
+    outputdic={
+        'kindle':KindleOutput,
+        'kindledx':KindleDXOutput,
+        'kindlepw':KindlePaperWhiteOutput,
+        'kindlefire':KindleFireOutput,
+        'others':OutputProfile,
+        }
+    OutputDevice = outputdic[output_type if output_type in outputdic.keys() else 'kindle']
+    setattr(opts, "dest", OutputDevice(None))
+    setattr(opts, "output_profile", OutputDevice(None))
     setattr(opts, "mobi_ignore_margins", True)
     setattr(opts, "extract_to", None)
     setattr(opts, "change_justification", "Left")
     setattr(opts, "process_images", True)
     setattr(opts, "mobi_keep_original_images", False)
-    setattr(opts, "graying_image", True)
-    setattr(opts, "image_png_to_jpg", True)
+    setattr(opts, "graying_image", COLOR_TO_GRAY) #changed
+    setattr(opts, "image_png_to_jpg", COLOR_TO_GRAY) #changed
     setattr(opts, "fix_indents", False)
-    setattr(opts, "reduce_image_to", REDUCE_IMAGE_TO)
+    setattr(opts, "reduce_image_to", REDUCE_IMAGE_TO or OutputDevice.screen_size)
     
     #epub
     setattr(opts, "dont_split_on_page_breaks", False)

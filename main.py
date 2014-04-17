@@ -3,13 +3,16 @@
 #A GAE web application to aggregate rss and send it to your kindle.
 #Visit https://github.com/cdhigh/KindleEar for the latest version
 #中文讨论贴：http://www.hi-pda.com/forum/viewthread.php?tid=1213082
+#Contributors:
+# rexdf <https://github.com/rexdf>
 
-__Version__ = "1.9.4"
+__Version__ = "1.12"
 __Author__ = "cdhigh"
 
 import os, datetime, logging, __builtin__, hashlib, time
 from collections import OrderedDict, defaultdict
 import gettext
+import re
 
 # for debug
 # 本地启动调试服务器：python.exe dev_appserver.py c:\kindleear
@@ -104,6 +107,7 @@ class KeUser(db.Model): # kindleEar User
     send_time = db.IntegerProperty()
     timezone = db.IntegerProperty()
     book_type = db.StringProperty()
+    device = db.StringProperty()
     expires = db.DateTimeProperty()
     ownfeeds = db.ReferenceProperty(Book) # 每个用户都有自己的自定义RSS
     titlefmt = db.StringProperty() #在元数据标题中添加日期的格式
@@ -114,6 +118,12 @@ class KeUser(db.Model): # kindleEar User
     evernote_mail = db.StringProperty() #evernote邮件地址
     wiz = db.BooleanProperty() #为知笔记
     wiz_mail = db.StringProperty()
+    xweibo = db.BooleanProperty()
+    tweibo = db.BooleanProperty()
+    facebook = db.BooleanProperty() #分享链接到facebook
+    twitter = db.BooleanProperty()
+    tumblr = db.BooleanProperty()
+    browser = db.BooleanProperty()
     
     @property
     def whitelist(self):
@@ -334,6 +344,7 @@ class Setting(BaseHandler):
             user.send_time = int(web.input().get('sendtime'))
             user.enable_send = bool(web.input().get('enablesend'))
             user.book_type = web.input().get('booktype')
+            user.device = web.input().get('devicetype') or 'kindle'
             user.titlefmt = web.input().get('titlefmt')
             alldays = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
             user.send_days = [day for day in alldays if web.input().get(day)]
@@ -370,9 +381,19 @@ class AdvShare(BaseHandler):
     """ 设置归档和分享配置项 """
     def GET(self):
         user = self.getcurrentuser()
-        return self.render('advshare.html',"Share",current='advsetting',
-            user=user,advcurr='share',savetoevernote=SAVE_TO_EVERNOTE,
-            savetowiz=SAVE_TO_WIZ)
+        current = 'advsetting'
+        advcurr = 'share'
+        savetoevernote = SAVE_TO_EVERNOTE
+        savetowiz = SAVE_TO_WIZ
+        shareonxweibo = SHARE_ON_XWEIBO
+        shareontweibo = SHARE_ON_TWEIBO
+        shareonfacebook = SHARE_ON_FACEBOOK
+        shareontwitter = SHARE_ON_TWITTER
+        shareontumblr = SHARE_ON_TUMBLR
+        openinbrowser = OPEN_IN_BROWSER
+        args = locals()
+        args.pop('self')
+        return self.render('advshare.html',"Share",**args)
         
     def POST(self):
         user = self.getcurrentuser()
@@ -386,11 +407,24 @@ class AdvShare(BaseHandler):
         wiz_mail = web.input().get('wiz_mail', '')
         if not wiz_mail:
             wiz = False
+        xweibo = bool(web.input().get('xweibo'))
+        tweibo = bool(web.input().get('tweibo'))
+        facebook = bool(web.input().get('facebook'))
+        twitter = bool(web.input().get('twitter'))
+        tumblr = bool(web.input().get('tumblr'))
+        browser = bool(web.input().get('browser'))
+        
         user.share_fuckgfw = fuckgfw
         user.evernote = evernote
         user.evernote_mail = evernote_mail
         user.wiz = wiz
         user.wiz_mail = wiz_mail
+        user.xweibo = xweibo
+        user.tweibo = tweibo
+        user.facebook = facebook
+        user.twitter = twitter
+        user.tumblr = tumblr
+        user.browser = browser
         user.put()
         
         raise web.seeother('')
@@ -498,7 +532,7 @@ class Login(BaseHandler):
             myfeeds.put()
             au = KeUser(name='admin',passwd=hashlib.md5('admin').hexdigest(),
                 kindle_email='',enable_send=False,send_time=8,timezone=TIMEZONE,
-                book_type="mobi",expires=None,ownfeeds=myfeeds,merge_books=False)
+                book_type="mobi",device='kindle',expires=None,ownfeeds=myfeeds,merge_books=False)
             au.put()
             return False
         else:
@@ -562,6 +596,23 @@ class Login(BaseHandler):
                         uf.user = u
                         uf.put()
                         
+            #如果删除了内置书籍py文件，则在数据库中也清除
+            #放在同步数据库是为了推送任务的效率
+            for bk in Book.all().filter('builtin = ', True):
+                found = False
+                for book in BookClasses():
+                    if book.title == bk.title:
+                        if bk.description != book.description:
+                            bk.description = book.description
+                            bk.put()
+                        found = True
+                        break
+                
+                if not found:
+                    for fd in bk.feeds:
+                        fd.delete()
+                    bk.delete()
+            
             raise web.seeother(r'/my')
         else:
             tips = _("The username not exist or password is wrong!")
@@ -818,66 +869,103 @@ class Deliver(BaseHandler):
                 sentcnt += 1
         self.flushqueue()
         return "Put <strong>%d</strong> books to queue!" % sentcnt
-
-def InsertToc(oeb, sections, toTail=True):
-    """ 创建OEB的两级目录，
-    sections为字典，关键词为段名，元素为元组列表(title,item,desc)
-    toTail=True则将HTML目录放在书籍末尾，否则放在前面
+        
+def InsertToc(oeb, sections, toc_thumbnails):
+    """ 创建OEB的两级目录，主要代码由rexdf贡献
+    sections为有序字典，关键词为段名，元素为元组列表(title,brief,humbnail,content)
+    toc_thumbnails为字典，关键词为图片原始URL，元素为其在oeb内的href。
     """
-    po = 1
-    htmltoc = ['<html><head><title>Table Of Contents</title></head><body><h2>Table Of Contents</h2>']
-    for sec in sections.keys():
-        htmltoc.append('<h3><a href="%s">%s</a></h3>'%(sections[sec][0][1].href,sec))
-        sectoc = oeb.toc.add(sec, sections[sec][0][1].href, play_order=po, id='toc_%d'%po)
-        po += 1
-        for title, a, brief in sections[sec]:
-            htmltoc.append('&nbsp;&nbsp;&nbsp;&nbsp;<a href="%s">%s</a><br />'%(a.href,title))
-            sectoc.add(title, a.href, description=brief if brief else None, play_order=po, id='toc_%d'%po)
-            po += 1
-    htmltoc.append('</body></html>')
-    id, href = oeb.manifest.generate(id='toc', href='toc.html')
-    item = oeb.manifest.add(id, href, 'application/xhtml+xml', data=''.join(htmltoc))
-    oeb.guide.add('toc', 'Table of Contents', href)
-    if toTail:
-        oeb.spine.add(item, True)
-    else:
-        oeb.spine.insert(0, item, True)
+    body_pat = r'(?<=<body>).*?(?=</body>)'
+    body_ex = re.compile(body_pat,re.M|re.S)
+    num_articles = 1
+    num_sections = 0
     
-def InsertPeriodicalToc(oeb, sections):
-    """杂志模式TOC """
-    po = 1
-    toc = oeb.toc.add(unicode(oeb.metadata.title[0]), 
-        oeb.spine[0].href, id='periodical', 
-        klass='periodical', play_order=po)
-    po += 1
-    htmltoc = ['<html><head><title>Table Of Contents</title></head><body><h2>Table Of Contents</h2>']
+    ncx_toc = []
+    #html_toc_2 secondary toc
+    html_toc_2 = []
+    name_section_list = []
     for sec in sections.keys():
-        sectoc = toc.add(unicode(sec), sections[sec][0][1].href,
-            klass='section', play_order=po, id='Main-section')
+        htmlcontent = ['<html><head><title>%s</title><style type="text/css">.pagebreak{page-break-before: always;} h2{font-size: 120%%;}</style></head><body>' % (sec)]
+        secondary_toc_list = []
+        first_flag = False
+        sec_toc_thumbnail = None
+        for title, brief, thumbnail, content in sections[sec]:
+            if first_flag:
+                htmlcontent.append('<div id="%d" class="pagebreak">' % (num_articles)) #insert anchor && pagebreak
+            else:
+                htmlcontent.append('<div id="%d">' % (num_articles)) #insert anchor && pagebreak
+                first_flag = True
+                if thumbnail:
+                    sec_toc_thumbnail = thumbnail #url
+            body_obj = re.search(body_ex, content)
+            if body_obj:
+                htmlcontent.append(body_obj.group()+'</div>') #insect article
+                secondary_toc_list.append((title, num_articles, brief, thumbnail))
+                num_articles += 1
+            else:
+                htmlcontent.pop()
+        htmlcontent.append('</body></html>')
+        
+        #add section.html to maninfest and spine
+        #We'd better not use id as variable. It's a python builtin function.
+        id_, href = oeb.manifest.generate(id='feed', href='feed%d.html'%num_sections)
+        item = oeb.manifest.add(id_, href, 'application/xhtml+xml', data=''.join(htmlcontent))
+        oeb.spine.add(item, True)
+        ncx_toc.append(('section',sec,href,'',sec_toc_thumbnail)) #Sections name && href && no brief
+
+        #generate the secondary toc
+        if GENERATE_HTML_TOC:
+            html_toc_ = ['<html><head><title>toc</title></head><body><h2>%s</h2><ol>' % (sec)]
+        for title, anchor, brief, thumbnail in secondary_toc_list:
+            if GENERATE_HTML_TOC:
+                html_toc_.append('&nbsp;&nbsp;&nbsp;&nbsp;<li><a href="%s#%d">%s</a></li><br />'%(href, anchor, title))
+            ncx_toc.append(('article',title, '%s#%d'%(href,anchor), brief, thumbnail)) # article name & article href && article brief
+        if GENERATE_HTML_TOC:
+            html_toc_.append('</ol></body></html>')
+            html_toc_2.append(html_toc_)
+            name_section_list.append(sec)
+
+        num_sections += 1
+
+    if GENERATE_HTML_TOC:
+        #Generate HTML TOC for Calibre mostly
+        ##html_toc_1 top level toc
+        html_toc_1 = [u'<html><head><title>Table Of Contents</title></head><body><h2>%s</h2><ul>'%(TABLE_OF_CONTENTS)]
+        html_toc_1_ = []
+        #We need index but not reversed()
+        for a in xrange(len(html_toc_2)-1,-1,-1):
+            #Generate Secondary HTML TOC
+            id_, href = oeb.manifest.generate(id='section', href='toc_%d.html' % (a))
+            item = oeb.manifest.add(id_, href, 'application/xhtml+xml', data=" ".join(html_toc_2[a]))
+            oeb.spine.insert(0, item, True)
+            html_toc_1_.append('&nbsp;&nbsp;&nbsp;&nbsp;<li><a href="%s">%s</a></li><br />'%(href,name_section_list[a]))
+        html_toc_2 = []
+        for a in reversed(html_toc_1_):
+            html_toc_1.append(a)
+        html_toc_1_ = []
+        html_toc_1.append('</ul></body></html>')
+        #Generate Top HTML TOC
+        id_, href = oeb.manifest.generate(id='toc', href='toc.html')
+        item = oeb.manifest.add(id_, href, 'application/xhtml+xml', data=''.join(html_toc_1))
+        oeb.guide.add('toc', 'Table of Contents', href)
+        oeb.spine.insert(0, item, True)
+
+    #Generate NCX TOC for Kindle
+    po = 1 
+    toc = oeb.toc.add(unicode(oeb.metadata.title[0]), oeb.spine[0].href, id='periodical', klass='periodical', play_order=po)
+    po += 1
+    for ncx in ncx_toc:
+        if ncx[0] == 'section':
+            sectoc = toc.add(unicode(ncx[1]), ncx[2], klass='section', play_order=po, id='Main-section-%d'%po, toc_thumbnail=toc_thumbnails[ncx[4]] if GENERATE_TOC_THUMBNAIL and ncx[4] else None)
+        elif sectoc:
+            sectoc.add(unicode(ncx[1]), ncx[2], description=ncx[3] if ncx[3] else None, klass='article', play_order=po, id='article-%d'%po, toc_thumbnail=toc_thumbnails[ncx[4]] if GENERATE_TOC_THUMBNAIL and ncx[4] else None)
         po += 1
-        htmltoc.append('<h3><a href="%s">%s</a></h3>'%(sections[sec][0][1].href,sec))
-        for title, a, brief in sections[sec]:
-            sectoc.add(unicode(title), a.href, description=brief if brief else None, 
-            klass='article', play_order=po, id='article-%d'%po)
-            po += 1
-            htmltoc.append('&nbsp;&nbsp;&nbsp;&nbsp;<a href="%s">%s</a><br />'%(a.href,title))
-    htmltoc.append('</body></html>')
-    id, href = oeb.manifest.generate(id='toc', href='toc.html')
-    item = oeb.manifest.add(id, href, 'application/xhtml+xml', data=''.join(htmltoc))
-    oeb.guide.add('toc', 'Table of Contents', href)
-    oeb.spine.add(item, True)
     
 class Worker(BaseHandler):
     """ 实际下载文章和生成电子书并且发送邮件 """
     def GET(self):
         username = web.input().get("u")
         bookid = web.input().get("id")
-        #to = web.input().get("to")
-        #booktype = web.input().get("type", "mobi")
-        #titlefmt = web.input().get("titlefmt")
-        #tz = int(web.input().get("tz", TIMEZONE))
-        #if not bookid:
-        #    return "No book to send!<br />"
         
         user = KeUser.all().filter("name = ", username).get()
         if not user:
@@ -911,11 +999,11 @@ class Worker(BaseHandler):
         
         # 创建 OEB
         global log
-        opts = getOpts()
+        opts = getOpts(user.device)
         oeb = CreateOeb(log, None, opts)
         title = "%s %s" % (book4meta.title, local_time(titlefmt, tz)) if titlefmt else book4meta.title
         
-        setMetaData(oeb, title, book4meta.language, local_time(tz=tz), 'KindleEar')
+        setMetaData(oeb, title, book4meta.language, local_time("%Y-%m-%d",tz), 'KindleEar')
         oeb.container = ServerContainer(log)
         
         #guide
@@ -924,21 +1012,22 @@ class Worker(BaseHandler):
             coverfile = book4meta.coverfile
         else:
             mhfile = DEFAULT_MASTHEAD
-            coverfile = DEFAULT_COVER
+            coverfile = DEFAULT_COVER_BV if user.merge_books else DEFAULT_COVER
         
         if mhfile:
-            id, href = oeb.manifest.generate('masthead', mhfile) # size:600*60
-            oeb.manifest.add(id, href, MimeFromFilename(mhfile))
+            id_, href = oeb.manifest.generate('masthead', mhfile) # size:600*60
+            oeb.manifest.add(id_, href, MimeFromFilename(mhfile))
             oeb.guide.add('masthead', 'Masthead Image', href)
         
         if coverfile:
-            id, href = oeb.manifest.generate('cover', coverfile)
-            item = oeb.manifest.add(id, href, MimeFromFilename(coverfile))
+            id_, href = oeb.manifest.generate('cover', coverfile)
+            item = oeb.manifest.add(id_, href, MimeFromFilename(coverfile))
             oeb.guide.add('cover', 'Cover', href)
-            oeb.metadata.add('cover', id)
+            oeb.metadata.add('cover', id_)
         
         itemcnt,imgindex = 0,0
         sections = OrderedDict()
+        toc_thumbnails = {} #map img-url -> manifest-href
         for bk in bks:
             if bk.builtin:
                 book = BookClass(bk.title)
@@ -961,26 +1050,29 @@ class Worker(BaseHandler):
                 book.feeds = [(feed.title, feed.url, feed.isfulltext) for feed in feeds]
                 book.url_filters = [flt.url for flt in user.urlfilter]            
             
-            # 对于html文件，变量名字自文档
-            # 对于图片文件，section为图片mime,url为原始链接,title为文件名,content为二进制内容
-            for sec_or_media, url, title, content, brief in book.Items(opts,user):
+            # 对于html文件，变量名字自文档,thumbnail为文章第一个img的url
+            # 对于图片文件，section为图片mime,url为原始链接,title为文件名,content为二进制内容,
+            #    img的thumbail仅当其为article的第一个img为True
+            for sec_or_media, url, title, content, brief, thumbnail in book.Items(opts,user):
                 if not sec_or_media or not title or not content:
                     continue
                 
                 if sec_or_media.startswith(r'image/'):
-                    id, href = oeb.manifest.generate(id='img', href=title)
-                    item = oeb.manifest.add(id, href, sec_or_media, data=content)
+                    id_, href = oeb.manifest.generate(id='img', href=title)
+                    item = oeb.manifest.add(id_, href, sec_or_media, data=content)
+                    if thumbnail:
+                        toc_thumbnails[url] = href
                     imgindex += 1
                 else:
-                    id, href = oeb.manifest.generate(id='feed', href='feed%d.html'%itemcnt)
-                    item = oeb.manifest.add(id, href, 'application/xhtml+xml', data=content)
-                    oeb.spine.add(item, True)
+                    #id, href = oeb.manifest.generate(id='feed', href='feed%d.html'%itemcnt)
+                    #item = oeb.manifest.add(id, href, 'application/xhtml+xml', data=content)
+                    #oeb.spine.add(item, True)
                     sections.setdefault(sec_or_media, [])
-                    sections[sec_or_media].append((title, item, brief))
+                    sections[sec_or_media].append((title, brief, thumbnail, content))
                     itemcnt += 1
                     
         if itemcnt > 0:
-            InsertToc(oeb, sections)
+            InsertToc(oeb, sections, toc_thumbnails)
             oIO = byteStringIO()
             o = EPUBOutput() if booktype == "epub" else MOBIOutput()
             o.convert(oeb, oIO, opts, log)
@@ -1042,7 +1134,7 @@ class Url2Book(BaseHandler):
         opts = oeb = None
         
         # 创建 OEB
-        opts = getOpts()
+        opts = getOpts(user.device)
         oeb = CreateOeb(log, None, opts)
         oeb.container = ServerContainer(log)
         
@@ -1063,25 +1155,28 @@ class Url2Book(BaseHandler):
         # 对于图片文件，section为图片mime,url为原始链接,title为文件名,content为二进制内容
         itemcnt,hasimage = 0,False
         sections = {subject:[]}
-        for sec_or_media, url, title, content, brief in book.Items(opts,user):
+        toc_thumbnails = {} #map img-url -> manifest-href
+        for sec_or_media, url, title, content, brief, thumbnail in book.Items(opts,user):
             if sec_or_media.startswith(r'image/'):
                 id, href = oeb.manifest.generate(id='img', href=title)
                 item = oeb.manifest.add(id, href, sec_or_media, data=content)
+                if thumbnail:
+                    toc_thumbnails[url] = href
                 itemcnt += 1
                 hasimage = True
             else:
-                id, href = oeb.manifest.generate(id='page', href='page.html')
-                item = oeb.manifest.add(id, href, 'application/xhtml+xml', data=content)
-                oeb.spine.add(item, False)
                 if len(book.feeds) > 1:
-                    sections[subject].append((title,item,brief))
+                    sections[subject].append((title,brief,thumbnail,content))
                 else:
+                    id, href = oeb.manifest.generate(id='page', href='page.html')
+                    item = oeb.manifest.add(id, href, 'application/xhtml+xml', data=content)
+                    oeb.spine.add(item, False)
                     oeb.toc.add(title, href)
                 itemcnt += 1
             
         if itemcnt > 0:
             if len(book.feeds) > 1:
-                InsertToc(oeb, sections)
+                InsertToc(oeb, sections, toc_thumbnails)
             elif not hasimage: #单文章没有图片则去掉封面
                 href = oeb.guide['cover'].href
                 oeb.guide.remove('cover')
@@ -1121,6 +1216,8 @@ class Share(BaseHandler):
         
         global log
         
+        url = urllib.unquote(url)
+        
         #因为知乎好文章比较多，特殊处理一下知乎
         if urlparse.urlsplit(url)[1].endswith('zhihu.com'):
             url = 'http://forwarder.ap01.aws.af.cm/?k=xzSlE&t=60&u=%s'%urllib.quote(url)
@@ -1147,7 +1244,7 @@ class Share(BaseHandler):
             
             # 对于html文件，变量名字自文档
             # 对于图片文件，section为图片mime,url为原始链接,title为文件名,content为二进制内容
-            for sec_or_media, url, title, content, brief in book.Items():
+            for sec_or_media, url, title, content, brief, thumbnail in book.Items():
                 if sec_or_media.startswith(r'image/'):
                     if self.SHARE_IMAGE_EMBEDDED:
                         attachments.append(mail.Attachment(title,
@@ -1214,22 +1311,6 @@ class Mylogs(BaseHandler):
         
 class RemoveLogs(BaseHandler):
     def GET(self):
-        #如果删除了内置书籍py文件，则在数据库中也清除，有最长一天的滞后问题不大
-        for bk in Book.all().filter('builtin = ', True):
-            found = False
-            for book in BookClasses():
-                if book.title == bk.title:
-                    if bk.description != book.description:
-                        bk.description = book.description
-                        bk.put()
-                    found = True
-                    break
-            
-            if not found:
-                for fd in bk.feeds:
-                    fd.delete()
-                bk.delete()
-        
         # 停止过期用户的推送
         for user in KeUser.all().filter('enable_send = ', True):
             if user.expires and (user.expires < datetime.datetime.utcnow()):
@@ -1243,7 +1324,7 @@ class RemoveLogs(BaseHandler):
         db.delete(logs)
         
         return "%s lines log removed.<br />" % c
-    
+        
 class SetLang(BaseHandler):
     def GET(self, lang):
         lang = lang.lower()
