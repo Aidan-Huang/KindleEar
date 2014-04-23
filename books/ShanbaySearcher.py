@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
-import urllib2 
+import urllib, urllib2 
 from bs4 import BeautifulSoup
+import simplejson
 
 class ShanbayNews(object):
     """An article of news in Shanbay"""
@@ -12,6 +13,8 @@ class ShanbayNews(object):
 
         if 'feeds.reuters.com' == source:
             self.search = ReutersSearcher()
+            self.source = "reuters.com"
+
         elif 'voanews.com' == source:
             self.search = VOASearcher()
         
@@ -34,40 +37,70 @@ class URLSearcher(object):
     def get_url(title):
         pass
 
+class GoogleSearcher:
+
+    @staticmethod
+
+    def get_url(title, source):
+
+        qstr = title + " site:" + source
+
+        query = urllib.urlencode({'q' : qstr})
+
+        url = 'http://ajax.googleapis.com/ajax/services/search/web?v=1.0&safe=active&%s' % (query)
+
+
+        try:
+
+            search_results = urllib.urlopen(url)
+        
+            json = simplejson.loads(search_results.read())
+
+            results = json['responseData']['results']
+
+            return results[0]['url']
+
+        except Exception as e:
+            print 'get article error [%s] : %s' % (title, str(e))
+
+
 
 class VOASearcher(URLSearcher):
 
     
     site = 'http://www.voanews.com'
-    search_url = '/search/?k='
+    search_url = '/search/?'
 
 
     @staticmethod
     def get_url(title):
 
-        title = "\"" + title.replace(' ', '%20') + "\""
+        query = urllib.urlencode({'k' : "\"" + title + "\""})
 
-        d = urllib2.urlopen(VOASearcher.site + VOASearcher.search_url + title)
+        # print VOASearcher.site + VOASearcher.search_url + query
+
+        d = urllib2.urlopen(VOASearcher.site + VOASearcher.search_url + query)
 
         soup = BeautifulSoup(d.read().decode('utf-8'))
+
 
         try:
 
             url = soup.find('a', attrs = {'class': 'linkmed'})['href']
+            url = VOASearcher.site + url
+
+            return url
 
         except Exception as e:
-            print title + ' :soup: ' + str(soup)
             raise SearchException("VOASearcher error:" + str(e)) 
-            
+  
 
-        return VOASearcher.site + url
-
-
+        
 class ReutersSearcher(URLSearcher):
 
 
     site = 'http://www.reuters.com'
-    search_url = '/search?blob='
+    search_url = '/search?'
 
     #Apple antitrust compliance off to a promising start: monitor
     #Apple+antitrust+compliance+off+to+a+promising+start%3A+monitor
@@ -76,9 +109,13 @@ class ReutersSearcher(URLSearcher):
     @staticmethod
     def get_url(title):
 
-        title = title.replace(' ', '+').replace(':', '%3A')
+        query = urllib.urlencode({'blob' : "\"" + title + "\""})
 
-        d = urllib2.urlopen(ReutersSearcher.site + ReutersSearcher.search_url + title)
+
+        # print ReutersSearcher.site + '/search?' + query
+    
+
+        d = urllib2.urlopen(ReutersSearcher.site + ReutersSearcher.search_url + query)
 
         soup = BeautifulSoup(d.read().decode('utf-8'))
 
@@ -86,15 +123,13 @@ class ReutersSearcher(URLSearcher):
         try:
                 
             url = soup.find('li', attrs = {'class': 'searchHeadline'}).a
+            url = url['href']
 
-        except NoResultsException as e:
-            raise SearchException("ReutersSearcher: No Results")
+            return url
+
         except Exception as e:
-            # print title + ' :soup: ' + str(soup)
             raise SearchException("ReutersSearcher error:" + str(e)) 
-            
-
-        return url['href']
+  
 
 class ShanbaySearcher(object):
     
@@ -132,7 +167,15 @@ class ShanbaySearcher(object):
             #     print 'get article error [%s] : %s' % (title, str(e))
             #     continue
             except Exception as e:
-                print 'get article error [%s] : %s' % (title, str(e))
+                print 'errer, now try GoogleSearcher:[%s] : %s' % (title, str(e))
+
+                try:
+                    url = GoogleSearcher.get_url(title, article.source)
+                    urls.append(('ShanbayNews', title, url, None))
+
+                except exception as e:
+                    print "no results:" + title
+
                 continue    
     
         return urls
@@ -152,21 +195,24 @@ class ShanbaySearcher(object):
 
 class main(object):
 
+    voa = "www.voanews.com"
+    reuters = "reuters.com"
+
     # title = "Study: Processed Meat Raises Colorectal Cancer Risk"
     # result_url = 'http://www.voanews.com/content/study-processed-meat-raises-colorectal-cancer-risk/1895891.html'    
-    # print VOASearcher.get_url(title) == result_url
+    # print GoogleSearcher.get_url(title, voa) #== result_url
 
     # title = "Colombian Novelist Garcia Marquez Dies at 87"
     # result_url = 'http://www.voanews.com/content/colombian-novelist-garcia-marquez-dies-at-87/1895828.html'    
-    # print VOASearcher.get_url(title) result_url == result_url
+    # print GoogleSearcher.get_url(title, voa) #result_url == result_url
 
     # title = "Scientists Create Highly Efficient Thermoelectric Material"
     # result_url = 'http://www.voanews.com/content/scientists-create-highly-efficient-thermoelectric-material/1895867.html'    
-    # print VOASearcher.get_url(title) == result_url
+    # print VOASearcher.get_url(title) #== result_url
 
     # title = "Bank of America's financial crisis costs become a recurring nightmare"
     # result_url = 'http://www.reuters.com/article/idUSBREA3F24B20140416'    
-    # print ReutersSearcher.get_url(title) == result_url
+    # print ReutersSearcher.get_url(title) #== result_url
 
     # title = "Wall Street Week Ahead: Spring fever brings hope for U.S. earnings"
     # result_url = 'http://www.reuters.com/article/idUSBREA3F24B20140416'    
@@ -190,5 +236,5 @@ class main(object):
     print "hello world"
 
 
-if __name__ == '__main__':
-    main()
+# if __name__ == '__main__':
+#     main()

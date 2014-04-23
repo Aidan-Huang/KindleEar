@@ -9,7 +9,6 @@ import time
 from base import BaseFeedBook
 from ShanbaySearcher import ShanbaySearcher
 
-
 def getBook():
     return Shanbay
 
@@ -33,17 +32,20 @@ class Shanbay(BaseFeedBook):
     #         (u'ShanbayNews', 'http://www.shanbay.com/read/news/'),
     #        ]
 
+
     def ParseFeedUrls(self):
         """ return list like [(section,title,url,desc),..] """
+
+        # print "shanbay ParseFeedUrls"
 
         return ShanbaySearcher().search()
 
 
-# class main(object):
+# class main():
 
 #     shanbay = Shanbay()
 
-#     # shanbay.ParseFeedUrls()
+#     shanbay.ParseFeedUrls()
 
 
 
