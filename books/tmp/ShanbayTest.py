@@ -53,4 +53,20 @@ class test(unittest.TestCase):
         self.assertEqual(str_today, news4.date)
 
 
+    def testRemoveDuplicate(self):
+
+        news1 = ShanbayNews('t2', 'voa', '04/28 2014')
+        news2 = ShanbayNews('t2', 'voa', '04/29 2014')
+        news3 = ShanbayNews('t2', 'voa', '04/30 2014')
+
+
+        news = [news1, news2, news3]
+
+        news = ShanbayNews.remove_duplicate(news)
+
+        self.assertEqual(1, len(news))
+
+        self.assertEqual('04/30 2014', news[0].date)
+
+
 unittest.main()
