@@ -13,7 +13,7 @@ class ShanbayNews(object):
 
         if 'feeds.reuters.com' == source:
             self.search = ReutersSearcher()
-            self.source = "reuters.com"
+            self.source = "www.reuters.com"
 
         elif 'voanews.com' == source:
             self.search = VOASearcher()
@@ -49,6 +49,7 @@ class GoogleSearcher:
 
         url = 'http://ajax.googleapis.com/ajax/services/search/web?v=1.0&safe=active&%s' % (query)
 
+        # print url
 
         try:
 
@@ -77,19 +78,15 @@ class VOASearcher(URLSearcher):
 
         query = urllib.urlencode({'k' : "\"" + title + "\""})
 
-        # print VOASearcher.site + VOASearcher.search_url + query
-
-        d = urllib2.urlopen(VOASearcher.site + VOASearcher.search_url + query)
-
-        soup = BeautifulSoup(d.read().decode('utf-8'))
-
-
         try:
 
-            url = soup.find('a', attrs = {'class': 'linkmed'})['href']
-            url = VOASearcher.site + url
+            d = urllib2.urlopen(VOASearcher.site + VOASearcher.search_url + query)
 
-            return url
+            soup = BeautifulSoup(d.read().decode('utf-8'))
+
+            url = soup.find('a', attrs = {'class': 'linkmed'})['href']
+        
+            return VOASearcher.site + url
 
         except Exception as e:
             raise SearchException("VOASearcher error:" + str(e)) 
@@ -114,18 +111,15 @@ class ReutersSearcher(URLSearcher):
 
         # print ReutersSearcher.site + '/search?' + query
     
-
-        d = urllib2.urlopen(ReutersSearcher.site + ReutersSearcher.search_url + query)
-
-        soup = BeautifulSoup(d.read().decode('utf-8'))
-
-        
         try:
+
+            d = urllib2.urlopen(ReutersSearcher.site + ReutersSearcher.search_url + query)
+
+            soup = BeautifulSoup(d.read().decode('utf-8'))
                 
             url = soup.find('li', attrs = {'class': 'searchHeadline'}).a
-            url = url['href']
 
-            return url
+            return url['href']
 
         except Exception as e:
             raise SearchException("ReutersSearcher error:" + str(e)) 
@@ -158,25 +152,29 @@ class ShanbaySearcher(object):
             #print 'title:' + title + ' | source:' + source + ' | date:' + date
         
             article = ShanbayNews(title, source, date)
+
+
+            url = ''
         
-            #print article.get_url()
     
             try:
-                urls.append(('ShanbayNews', title, article.get_url(),None))
-            # except SearchException as e:
-            #     print 'get article error [%s] : %s' % (title, str(e))
-            #     continue
+                url = article.get_url()
+
             except Exception as e:
                 print 'errer, now try GoogleSearcher:[%s] : %s' % (title, str(e))
 
                 try:
                     url = GoogleSearcher.get_url(title, article.source)
-                    urls.append(('ShanbayNews', title, url, None))
-
+                    
                 except exception as e:
                     print "no results:" + title
 
-                continue    
+                continue   
+
+                title = article.source.replace('www.', '').replace('.com', ': ') + title
+
+            urls.append(('ShanbayNews', title, url, None))
+
     
         return urls
 
@@ -196,7 +194,13 @@ class ShanbaySearcher(object):
 class main(object):
 
     voa = "www.voanews.com"
-    reuters = "reuters.com"
+    reuters = "www.reuters.com"
+
+    # http://www.reuters.com/article/2013/09/16/us-markets-stocks-idUSBRE9890IQ20130916
+
+    # title = "Global Technology Report Notes Increased Digital Divide"
+    # result_url = 'http://www.voanews.com/content/study-processed-meat-raises-colorectal-cancer-risk/1895891.html'    
+    # print GoogleSearcher.get_url(title, voa) #== result_url
 
     # title = "Study: Processed Meat Raises Colorectal Cancer Risk"
     # result_url = 'http://www.voanews.com/content/study-processed-meat-raises-colorectal-cancer-risk/1895891.html'    
