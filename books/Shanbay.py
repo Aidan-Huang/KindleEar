@@ -45,6 +45,8 @@ class Shanbay(BaseFeedBook):
         news = ShanbayNews.getTodayNews()
     
         news = ShanbayNews.today(news)
+
+        news = ShanbayNews.remove_duplicate(news)
     
         for a_news in news:
             
@@ -63,13 +65,10 @@ class Shanbay(BaseFeedBook):
                     print "no results:" + title
                 continue   
 
-            title = a_news.source.replace('www.', '').replace('.com', ': ') + title
-            urls.append(('Shanbay', title, url, None))
+            source = a_news.source.replace('www.', '').replace('.com', ': ')
+            urls.append((source, title, url, None))
     
         return urls
-
-
-
 
 class ShanbayNews(object):
     """An article of news in Shanbay"""
@@ -136,6 +135,16 @@ class ShanbayNews(object):
 
         return r_news
 
+    @staticmethod
+    def remove_duplicate(news):
+        r_news = {}
+        for a_news in news:
+            r_news[a_news.title] = a_news
+
+        return r_news.values()
+
+
+
 
 class SearchException(Exception):
     """fitting article exception"""
@@ -162,8 +171,6 @@ class GoogleSearcher:
 
         url = 'http://ajax.googleapis.com/ajax/services/search/web?v=1.0&safe=off&%s' % (query)
 
-        # print url
-
         try:
 
             search_results = urllib.urlopen(url)
@@ -176,7 +183,6 @@ class GoogleSearcher:
 
         except Exception as e:
             print 'get article error [%s] : %s' % (title, str(e))
-
 
 
 class VOASearcher(URLSearcher):
@@ -212,17 +218,11 @@ class ReutersSearcher(URLSearcher):
     site = 'http://www.reuters.com'
     search_url = '/search?'
 
-    #Apple antitrust compliance off to a promising start: monitor
-    #Apple+antitrust+compliance+off+to+a+promising+start%3A+monitor
-   
 
     @staticmethod
     def get_url(title):
 
         query = urllib.urlencode({'blob' : "\"" + title + "\""})
-
-
-        # print ReutersSearcher.site + '/search?' + query
     
         try:
 
@@ -237,7 +237,6 @@ class ReutersSearcher(URLSearcher):
         except Exception as e:
             raise SearchException("ReutersSearcher error:" + str(e)) 
   
-
 
 # class main():
 
